@@ -40,7 +40,6 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
-          # 🌟 关键修改：加上了 32 位和 64 位的 Android 编译目标
           targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Install Android NDK
@@ -66,12 +65,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/apk
-          for flavor in standard legacy; do
-            apk="app/build/outputs/apk/$flavor/release/app-$flavor-release.apk"
-            if [ -f "$apk" ]; then
-              cp -v "$apk" dist/apk/
-            fi
-          done
+          # 🌟 不再猜路径了，直接全盘搜索所有的 .apk 文件并复制过来
+          find . -type f -name "*.apk" -exec cp -v {} dist/apk/ \;
+          
           echo "Collected APKs:"
           ls -1 dist/apk
 
