@@ -40,7 +40,8 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: aarch64-linux-android
+          # 🌟 关键修改：加上了 32 位和 64 位的 Android 编译目标
+          targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Install Android NDK
         run: |
@@ -51,27 +52,6 @@ jobs:
           NDK_BIN="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           test -x "$NDK_BIN/aarch64-linux-android$MIN_SDK-clang"
           test -x "$NDK_BIN/llvm-strip"
-
-      - name: Prepare PRoot cache key
-        id: proot_cache_inputs
-        run: |
-          echo "commit=$(git -C third_party/proot-static rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "ndk=$(sed -n 's/^ndk = \"\(.*\)\"/\1/p' gradle/libs.versions.toml)" >> "$GITHUB_OUTPUT"
-          echo "min_sdk=$(sed -n 's/^minSdk = \"\(.*\)\"/\1/p' gradle/libs.versions.toml)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache PRoot build
-        uses: actions/cache@v4
-        with:
-          path: target/proot-static
-          key: proot-${{ runner.os }}-${{ runner.arch }}-${{ steps.proot_cache_inputs.outputs.commit }}-${{ steps.proot_cache_inputs.outputs.ndk }}-${{ steps.proot_cache_inputs.outputs.min_sdk }}-${{ hashFiles('patches/proot/android-ptrace-events.patch', 'third_party/proot-static/tools/build-static-aarch64.sh') }}
-          restore-keys: |
-            proot-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          workspaces: . -> target
 
       - name: Install system dependencies
         run: |
@@ -86,15 +66,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/apk
-
           for flavor in standard legacy; do
             apk="app/build/outputs/apk/$flavor/release/app-$flavor-release.apk"
-            # 如果文件存在才复制，防止没生成导致报错
             if [ -f "$apk" ]; then
               cp -v "$apk" dist/apk/
             fi
           done
-
           echo "Collected APKs:"
           ls -1 dist/apk
 
