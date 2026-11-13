@@ -1,123 +1,46 @@
-name: CI
+name: Build APK
 
 on:
   push:
-    branches: [master]
+    branches:
+      - master
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: recursive
 
-      - uses: actions/setup-java@v6
+      - name: Free disk space for build and caches
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo apt-get clean
+          df -h /
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 21
           cache: gradle
 
-      - run: chmod +x gradlew
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-          targets: aarch64-linux-android, armv7-linux-androideabi
-
-      - name: Install Android NDK
-        run: |
-          NDK_VER=$(sed -n 's/^ndk = "\(.*\)"/\1/p' gradle/libs.versions.toml)
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VER"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-          workspaces: . -> target
-
-      - run: |
-          timeout 180 sudo apt-get update || echo "apt-get update 超时跳过（不影响编译）"
-          sudo apt install -y gcc-multilib || echo "gcc-multilib 安装失败但不影响编译"
-
-      - name: Build native library
-        run: |
-          cargo xtask configure
-          cargo xtask build --native-only
-
-      - name: Setup signing keystore
-        run: |
-          if [ -n "${{ secrets.WEKITE_KEYSTORE_B64 }}" ]; then
-            echo "${{ secrets.WEKITE_KEYSTORE_B64 }}" | base64 -d > wekite-release.jks
-            echo "keystore ready: $(stat -c%s wekite-release.jks) bytes"
-          else
-            echo "no keystore secret, using debug signing"
-          fi
-
-      - name: Build APK
-        run: ./gradlew assembleStandardRelease --warning-mode all --rerun-tasks
-        env:
-          WEKIT_KEYSTORE_FILE: ${{ github.workspace }}/wekite-release.jks
-          WEKIT_KEYSTORE_PASSWORD: ${{ secrets.WEKITE_KEYSTORE_PASSWORD }}
-          WEKIT_KEY_ALIAS: ${{ secrets.WEKITE_KEY_ALIAS }}
-          WEKIT_KEY_PASSWORD: ${{ secrets.WEKITE_KEY_PASSWORD }}
-
-      - name: Verify DEX class names survive R8 (keepRules)
-        run: |
-          APK=$(find app/build/outputs -name "*.apk" | head -1)
-          python3 - "$APK" <<'EOF'
-          import zipfile, sys
-          apk = sys.argv[1]
-          z = zipfile.ZipFile(apk)
-          dex_all = b""
-          for name in z.namelist():
-              if name.startswith('classes') and name.endswith('.dex'):
-                  dex_all += z.read(name)
-          # IResolveDex 实现类必须全部保留原始类名（keepRules 生效的证明）
-          required = [b'ReplaceNavigationBar',
-                      b'WeMainActivityBeautifyApi', b'WeChatMessageViewApi',
-                      b'WeDatabaseApi', b'MonetEngine', b'AutoCacheImages',
-                      b'BlockVoipRingtone', b'VirtualVoipVideo', b'HideConversationListDividers',
-                      b'RemoveOfficialAccountAds', b'SkipSplash', b'ShowWxIdInContactDetails',
-                      b'MessageTimeEnhancements', b'FloatingChatFooter',
-                      b'NotificationsEvolved']
-          missing = [c.decode() for c in required if c not in dex_all]
-          if missing:
-              print("FAIL: keepRules/rules.keep broken — missing from DEX:", missing)
-              sys.exit(1)
-          print("OK: all IResolveDex class names preserved in DEX")
-          EOF
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: wekite-apk
-          path: app/build/outputs/**/*.apk
-
-  build_zygisk:
-    needs: build
-    runs-on: ubuntu-latest
-    if: ${{ needs.build.result == 'success' }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          submodules: recursive
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: 21
+      - name: Grant execute permission
+        run: chmod +x gradlew
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@nightly
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi
+          targets: aarch64-linux-android
 
       - name: Install Android NDK
         run: |
@@ -127,26 +50,73 @@ jobs:
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$NDK_VERSION"
           NDK_BIN="$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin"
           test -x "$NDK_BIN/aarch64-linux-android$MIN_SDK-clang"
-          test -x "$NDK_BIN/armv7a-linux-androideabi$MIN_SDK-clang"
           test -x "$NDK_BIN/llvm-strip"
 
-      - name: Download Release APK artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: wekite-apk
-          path: artifacts
-
-      - name: Build Zygisk module
+      - name: Prepare PRoot cache key
+        id: proot_cache_inputs
         run: |
-          APK_PATH=$(find artifacts -name "WeKite-*standard-release.apk" | head -1)
-          echo "APK: $APK_PATH"
-          test -n "$APK_PATH"
-          ./x zygisk build --apk-release --release --skip-apk-build \
-            --apk "$APK_PATH"
+          echo "commit=$(git -C third_party/proot-static rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "ndk=$(sed -n 's/^ndk = \"\(.*\)\"/\1/p' gradle/libs.versions.toml)" >> "$GITHUB_OUTPUT"
+          echo "min_sdk=$(sed -n 's/^minSdk = \"\(.*\)\"/\1/p' gradle/libs.versions.toml)" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Zygisk module
-        uses: actions/upload-artifact@v7
+      - name: Cache PRoot build
+        uses: actions/cache@v4
         with:
-          name: wekite-zygisk
-          path: wekite-zygisk/release/*.zip
-          if-no-files-found: error
+          path: target/proot-static
+          key: proot-${{ runner.os }}-${{ runner.arch }}-${{ steps.proot_cache_inputs.outputs.commit }}-${{ steps.proot_cache_inputs.outputs.ndk }}-${{ steps.proot_cache_inputs.outputs.min_sdk }}-${{ hashFiles('patches/proot/android-ptrace-events.patch', 'third_party/proot-static/tools/build-static-aarch64.sh') }}
+          restore-keys: |
+            proot-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: . -> target
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          version: "0.12.8"
+          python-version: "3.12"
+          enable-cache: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc-multilib
+          uv sync --locked --managed-python --project wekit-zygisk --all-groups
+          echo "$GITHUB_WORKSPACE/wekit-zygisk/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Validate build tools, DEX reader, and i18n catalogs
+        run: |
+          cargo test -p xtask --bin xtask
+          cargo test -p wekit-zygisk --lib
+          uv run --no-sync --project wekit-zygisk python wekit-zygisk/native/tests/arm64_relocation.py
+          ./x i18n-check
+
+      - name: Build Release (Unsigned)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./x build --release
+
+      - name: Collect APKs
+        run: |
+          set -euo pipefail
+          mkdir -p dist/apk
+
+          for flavor in standard legacy; do
+            apk="app/build/outputs/apk/$flavor/release/app-$flavor-release.apk"
+            # 如果文件存在才复制，防止没生成导致报错
+            if [ -f "$apk" ]; then
+              uv run --no-sync --project wekit-zygisk python .github/scripts/verify-dual-apk.py --check-installer "$apk"
+              cp -v "$apk" dist/apk/
+            fi
+          done
+
+          echo "Collected APKs:"
+          ls -1 dist/apk
+
+      - name: Upload Release APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: wekit-apk
+          path: dist/apk/*.apk
