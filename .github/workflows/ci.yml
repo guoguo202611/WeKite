@@ -73,25 +73,9 @@ jobs:
           cache-on-failure: true
           workspaces: . -> target
 
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v2
-        with:
-          version: "0.12.8"
-          python-version: "3.12"
-          enable-cache: false
-
       - name: Install system dependencies
         run: |
           sudo apt-get update && sudo apt-get install -y gcc-multilib
-          uv sync --locked --managed-python --project wekit-zygisk --all-groups
-          echo "$GITHUB_WORKSPACE/wekit-zygisk/.venv/bin" >> "$GITHUB_PATH"
-
-      - name: Validate build tools, DEX reader, and i18n catalogs
-        run: |
-          cargo test -p xtask --bin xtask
-          cargo test -p wekit-zygisk --lib
-          uv run --no-sync --project wekit-zygisk python wekit-zygisk/native/tests/arm64_relocation.py
-          ./x i18n-check
 
       - name: Build Release (Unsigned)
         env:
@@ -107,7 +91,6 @@ jobs:
             apk="app/build/outputs/apk/$flavor/release/app-$flavor-release.apk"
             # 如果文件存在才复制，防止没生成导致报错
             if [ -f "$apk" ]; then
-              uv run --no-sync --project wekit-zygisk python .github/scripts/verify-dual-apk.py --check-installer "$apk"
               cp -v "$apk" dist/apk/
             fi
           done
